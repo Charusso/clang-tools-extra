@@ -93,6 +93,15 @@ Improvements to clang-tidy
   Flags uses of ``absl::StrCat()`` to append to a ``std::string``. Suggests 
   ``absl::StrAppend()`` should be used instead.
 
+- New :doc:`bugprone-not-null-terminated-result
+  <clang-tidy/checks/bugprone-not-null-terminated-result>` check
+
+  Finds function calls where it is possible to cause a not null-terminated
+  result. Usually the proper length of a string is ``strlen(src) + 1`` or equal
+  length of this expression, because the null terminator needs an extra space.
+  Without the null terminator it can result in an undefined behaviour when the
+  string is read.
+
 - New :doc:`readability-magic-numbers
   <clang-tidy/checks/readability-magic-numbers>` check.
 
