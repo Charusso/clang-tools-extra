@@ -113,3 +113,10 @@ void good_memcpy_macro() {
   unsigned char dst05[13];
   memcpy_s(dst05, 13, SRC, SRC_LENGTH + 1);
 }
+
+// The following two checks the false-positive suppression.
+void good_memcpy_tricky() {
+  char *dst06 = (char *)malloc(13);
+  memcpy(&dst06[0], "foobarbazqux", 12);
+  dst06[13] = '\0';
+}
