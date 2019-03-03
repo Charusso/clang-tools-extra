@@ -336,10 +336,13 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
       declRefExpr(allOf(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)),
                         expr().bind(UnknownDestName)));
 
+  auto DestKnownDecl =
+      declRefExpr(hasDefinition(anyOf(AnyOfDestInit, DestArrayTyDecl)));
+
   // Tie the above cases together in one matcher.
   auto AnyOfDestDecl =
-      allOf(anyOf(hasDefinition(anyOf(AnyOfDestInit, DestArrayTyDecl)),
-                  DestUnknownDecl, anything()),
+      allOf(anyOf(DestKnownDecl, hasDescendant(DestKnownDecl), DestUnknownDecl,
+                  hasDescendant(DestUnknownDecl), anything()),
             expr().bind(DestExprName));
 
   // Match to the 'source' expression.
