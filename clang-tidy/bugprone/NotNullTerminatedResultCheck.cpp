@@ -6,13 +6,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-
+// FIXME: If one of the build-bots fail remove the includes tagged with 'this'.
+//        If no problem occurs please remove me with the (4) tags.
 #include "NotNullTerminatedResultCheck.h"
-//#include "clang/AST/ASTContext.h"
-//#include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/AST/ASTContext.h"             // this
+#include "clang/ASTMatchers/ASTMatchFinder.h" // this
 #include "clang/Frontend/CompilerInstance.h"
-//#include "clang/Lex/Lexer.h"
-//#include "clang/Lex/PPCallbacks.h"
+#include "clang/Lex/Lexer.h"                  // this
+#include "clang/Lex/PPCallbacks.h"            // this
 
 using namespace clang::ast_matchers;
 
@@ -191,7 +192,7 @@ AST_MATCHER_P(Expr, hasDefinition, ast_matchers::internal::Matcher<Expr>,
   const char *const VarDeclName = "variable-declaration";
   auto DREHasDefinition = ignoringImpCasts(declRefExpr(
       allOf(to(varDecl().bind(VarDeclName)),
-            hasAncestor(compoundStmt(hasDescendant(binaryOperator(
+            hasAncestor(compoundStmt(forEachDescendant(binaryOperator(
                 hasLHS(declRefExpr(to(varDecl(equalsBoundNode(VarDeclName))))),
                 hasRHS(ignoringImpCasts(InnerMatcher)))))))));
 
@@ -241,19 +242,19 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // The following six cases match problematic length expressions.
   //===--------------------------------------------------------------------===//
 
-  // 1.) Example:  char src[] = "foo";       strlen(src);
+  // 1) Example:  char src[] = "foo";       strlen(src);
   auto Strlen =
       callExpr(callee(functionDecl(hasAnyName("::strlen", "::wcslen"))))
           .bind(WrongLengthExprName);
 
-  // 2.) Example:  std::string str = "foo";  'str.size()' or 'str.length()'
+  // 2) Example:  std::string str = "foo";  'str.size()' or 'str.length()'
   auto SizeOrLength =
       cxxMemberCallExpr(
           allOf(on(expr(AnyOfStringTy)),
                 has(memberExpr(member(hasAnyName("size", "length"))))))
           .bind(WrongLengthExprName);
 
-  // 3.) Example:  char src[] = "foo";       sizeof(src);
+  // 3) Example:  char src[] = "foo";       sizeof(src);
   auto SizeOfCharExpr = unaryExprOrTypeTraitExpr(has(expr(hasType(qualType(
       hasCanonicalType(anyOf(arrayType(hasElementType(isAnyCharacter())),
                              pointerType(pointee(isAnyCharacter())))))))));
@@ -263,17 +264,17 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
       anyOf(ignoringImpCasts(Strlen), ignoringImpCasts(SizeOrLength),
             hasDescendant(Strlen), hasDescendant(SizeOrLength));
 
-  // 4.) Example:  length = strlen(src);
+  // 4) Example:  length = strlen(src);
   auto DREWithoutInc = ignoringImpCasts(
       declRefExpr(to(varDecl(hasInitializer(ProblematicLength)))));
 
   auto AnyOfCallOrDREWithoutInc = anyOf(DREWithoutInc, ProblematicLength);
 
-  // 5.) Example:  int getLength(const char *str) { return strlen(str); }
+  // 5) Example:  int getLength(const char *str) { return strlen(str); }
   auto CallExprReturnWithoutInc = ignoringImpCasts(callExpr(callee(functionDecl(
       hasBody(has(returnStmt(hasReturnValue(AnyOfCallOrDREWithoutInc))))))));
 
-  // 6.) Example:  int length = getLength(src);
+  // 6) Example:  int length = getLength(src);
   auto DREHasReturnWithoutInc = ignoringImpCasts(
       declRefExpr(to(varDecl(hasInitializer(CallExprReturnWithoutInc)))));
 
@@ -305,7 +306,9 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // expression which is used in memcpy() and memmove() matchers.
   //===--------------------------------------------------------------------===//
 
-  auto SizeExpr = anyOf(SizeOfCharExpr, integerLiteral(equals(1)));
+  // 1) Example: 'sizeof(char)' which is '1' or size of 'wchar_t' which is '2'.
+  auto SizeExpr = anyOf(sizeOfExpr(hasType(qualType(hasCanonicalType(CharTy)))),
+                        integerLiteral(anyOf(equals(1), equals(2))));
 
   auto MallocLengthExpr = allOf(
       anyOf(argumentCountIs(1), argumentCountIs(2)),
@@ -313,31 +316,33 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
                            expr(ignoringImpCasts(anyOf(HasIncOp, anything())))
                                .bind(DestMallocExprName))));
 
-  // - Example:  (char *)malloc(length);
+  // 2) Example:  (char *)malloc(length);
   auto DestMalloc = anyOf(castExpr(has(callExpr(MallocLengthExpr))),
                           callExpr(MallocLengthExpr));
 
-  // - Example:  new char[length];
+  // 3) Example:  new char[length];
   auto DestCXXNewExpr = ignoringImpCasts(
       cxxNewExpr(hasArraySize(expr().bind(DestMallocExprName))));
 
   auto AnyOfDestInit = anyOf(DestMalloc, DestCXXNewExpr);
 
-  // - Example:  char dest[13];  or  char dest[length];
+  // 4) Example:  char dest[13];  or  char dest[length];
   auto DestArrayTyDecl = declRefExpr(
       to(anyOf(varDecl(CharTyArray).bind(DestVarDeclName),
                varDecl(hasInitializer(AnyOfDestInit)).bind(DestVarDeclName))));
 
-  // - Example:  foo[bar[baz]].qux; (or just ParmVarDecl which is a VarDecl)
+  // 5) Example:  foo[bar[baz]].qux; (or just ParmVarDecl which is a VarDecl)
   auto DestUnknownDecl =
       declRefExpr(allOf(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)),
                         expr().bind(UnknownDestName)));
 
+  // Tie the above cases together in one matcher.
   auto AnyOfDestDecl =
       allOf(anyOf(hasDefinition(anyOf(AnyOfDestInit, DestArrayTyDecl)),
                   DestUnknownDecl, anything()),
             expr().bind(DestExprName));
 
+  // Match to the 'source' expression.
   auto SrcDecl = declRefExpr(
       allOf(to(decl().bind(SrcVarDeclName)),
             anyOf(hasAncestor(cxxMemberCallExpr().bind(SrcExprName)),
@@ -349,11 +354,25 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   auto AnyOfSrcDecl = anyOf(ignoringImpCasts(stringLiteral().bind(SrcExprName)),
                             SrcDeclMayInBinOp);
 
+  //===--------------------------------------------------------------------===//
+  // False positive suppression.
+  //===--------------------------------------------------------------------===//
+
+  auto DestDRE = declRefExpr(to(varDecl(equalsBoundNode(DestVarDeclName))));
+
+  // If the null terminator is hard-coded later the result is null-terminated.
   auto NullTerminatorExpr = binaryOperator(
-      hasLHS(hasDescendant(
-          declRefExpr(to(varDecl(equalsBoundNode(DestVarDeclName)))))),
+      hasLHS(hasDescendant(DestDRE)),
       hasRHS(ignoringImpCasts(
           anyOf(characterLiteral(equals(0U)), integerLiteral(equals(0))))));
+
+  // If the result is rewritten in other function it is usually null-terminated.
+  auto ResultIsRewritten = callExpr(hasAnyArgument(ignoringImpCasts(
+      binaryOperator(hasEitherOperand(ignoringImpCasts(DestDRE))))));
+
+  auto FalsePositive =
+      hasAncestor(compoundStmt(anyOf(forEachDescendant(NullTerminatorExpr),
+                                     forEachDescendant(ResultIsRewritten))));
 
   //===--------------------------------------------------------------------===//
   // The following nineteen cases match problematic function calls.
@@ -363,14 +382,12 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // - Example:  memset(void *destination, int character, int length);
   const auto WithoutSrc = [=](StringRef Name, int LengthPos,
                               StrlenKind LengthKind) {
-    return allOf(
-        callee(functionDecl(hasName(Name))),
-        hasArgument(
-            0, allOf(AnyOfDestDecl, unless(hasAncestor(compoundStmt(
-                                        hasDescendant(NullTerminatorExpr)))))),
-        hasArgument(LengthPos, (LengthKind == StrlenKind::WithoutInc)
-                                   ? LengthWithoutInc
-                                   : LengthWithInc));
+    return allOf(callee(functionDecl(hasName(Name))),
+                 hasArgument(0, AnyOfDestDecl),
+                 hasArgument(LengthPos, (LengthKind == StrlenKind::WithoutInc)
+                                            ? LengthWithoutInc
+                                            : LengthWithInc),
+                 unless(FalsePositive));
   };
 
   // If the function call has a 'source' argument call this lambda.
@@ -378,14 +395,12 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   const auto WithSrc = [=](StringRef Name, int SourcePos, int LengthPos,
                            StrlenKind LengthKind) {
     return allOf(callee(functionDecl(hasName(Name))),
-                 hasArgument(SourcePos ? 0 : 1,
-                             allOf(AnyOfDestDecl,
-                                   unless(hasAncestor(compoundStmt(
-                                       hasDescendant(NullTerminatorExpr)))))),
+                 hasArgument(SourcePos ? 0 : 1, AnyOfDestDecl),
                  hasArgument(SourcePos, AnyOfSrcDecl),
                  hasArgument(LengthPos, (LengthKind == StrlenKind::WithoutInc)
                                             ? LengthWithoutInc
-                                            : LengthWithInc));
+                                            : LengthWithInc),
+                 unless(FalsePositive));
   };
 
   auto Memcpy = WithSrc("::memcpy", 1, 2, StrlenKind::WithoutInc);
