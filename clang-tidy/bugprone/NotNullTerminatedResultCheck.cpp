@@ -203,6 +203,10 @@ AST_MATCHER_P(Expr, hasDefinition, ast_matchers::internal::Matcher<Expr>,
 } // namespace
 
 void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
+
+  //===--------------------------------------------------------------------===//
+  // The following ten is just helper functions.
+  //===--------------------------------------------------------------------===//
   auto IncOp =
       binaryOperator(hasOperatorName("+"),
                      hasEitherOperand(ignoringParenImpCasts(integerLiteral())));
@@ -237,42 +241,44 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // The following six cases match problematic length expressions.
   //===--------------------------------------------------------------------===//
 
-  // - Example:  char src[] = "foo";       strlen(src);
+  // 1.) Example:  char src[] = "foo";       strlen(src);
   auto Strlen =
       callExpr(callee(functionDecl(hasAnyName("::strlen", "::wcslen"))))
           .bind(WrongLengthExprName);
 
-  // - Example:  std::string str = "foo";  str.size();
+  // 2.) Example:  std::string str = "foo";  'str.size()' or 'str.length()'
   auto SizeOrLength =
       cxxMemberCallExpr(
           allOf(on(expr(AnyOfStringTy)),
                 has(memberExpr(member(hasAnyName("size", "length"))))))
           .bind(WrongLengthExprName);
 
-  // - Example:  char src[] = "foo";       sizeof(src);
+  // 3.) Example:  char src[] = "foo";       sizeof(src);
   auto SizeOfCharExpr = unaryExprOrTypeTraitExpr(has(expr(hasType(qualType(
       hasCanonicalType(anyOf(arrayType(hasElementType(isAnyCharacter())),
                              pointerType(pointee(isAnyCharacter())))))))));
 
-  auto WrongLength =
+  // The above three example is problematic.
+  auto ProblematicLength =
       anyOf(ignoringImpCasts(Strlen), ignoringImpCasts(SizeOrLength),
             hasDescendant(Strlen), hasDescendant(SizeOrLength));
 
-  // - Example:  length = strlen(src);
-  auto DREWithoutInc =
-      ignoringImpCasts(declRefExpr(to(varDecl(hasInitializer(WrongLength)))));
+  // 4.) Example:  length = strlen(src);
+  auto DREWithoutInc = ignoringImpCasts(
+      declRefExpr(to(varDecl(hasInitializer(ProblematicLength)))));
 
-  auto AnyOfCallOrDREWithoutInc = anyOf(DREWithoutInc, WrongLength);
+  auto AnyOfCallOrDREWithoutInc = anyOf(DREWithoutInc, ProblematicLength);
 
-  // - Example:  int getLength(const char *str) { return strlen(str); }
+  // 5.) Example:  int getLength(const char *str) { return strlen(str); }
   auto CallExprReturnWithoutInc = ignoringImpCasts(callExpr(callee(functionDecl(
       hasBody(has(returnStmt(hasReturnValue(AnyOfCallOrDREWithoutInc))))))));
 
-  // - Example:  int length = getLength(src);
+  // 6.) Example:  int length = getLength(src);
   auto DREHasReturnWithoutInc = ignoringImpCasts(
       declRefExpr(to(varDecl(hasInitializer(CallExprReturnWithoutInc)))));
 
-  auto AnyOfWrongLengthInit =
+  // Tie the above cases together in one matcher.
+  auto AnyOfProblematicLengthInit =
       anyOf(AnyOfCallOrDREWithoutInc, CallExprReturnWithoutInc,
             DREHasReturnWithoutInc);
 
@@ -286,7 +292,7 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
                         : ignoringImpCasts(
                               allOf(hasDefinition(HasIncOp),
                                     unless(hasDefinition(HasDecOp)))),
-                    AnyOfWrongLengthInit),
+                    AnyOfProblematicLengthInit),
               ignoringImpCasts(integerLiteral().bind(WrongLengthExprName))),
         expr().bind(LengthExprName)));
   };
@@ -322,7 +328,7 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
       to(anyOf(varDecl(CharTyArray).bind(DestVarDeclName),
                varDecl(hasInitializer(AnyOfDestInit)).bind(DestVarDeclName))));
 
-  // - Example:  foo[bar[baz]].qux; (or just ParmVarDecl)
+  // - Example:  foo[bar[baz]].qux; (or just ParmVarDecl which is a VarDecl)
   auto DestUnknownDecl =
       declRefExpr(allOf(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)),
                         expr().bind(UnknownDestName)));
@@ -353,6 +359,8 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // The following nineteen cases match problematic function calls.
   //===--------------------------------------------------------------------===//
 
+  // If the function call does not have a 'source' argument call this lambda.
+  // - Example:  memset(void *destination, int character, int length);
   const auto WithoutSrc = [=](StringRef Name, int LengthPos,
                               StrlenKind LengthKind) {
     return allOf(
@@ -365,6 +373,8 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
                                    : LengthWithInc));
   };
 
+  // If the function call has a 'source' argument call this lambda.
+  // - Example:  memcpy(void *destination, const void *source, int length);
   const auto WithSrc = [=](StringRef Name, int SourcePos, int LengthPos,
                            StrlenKind LengthKind) {
     return allOf(callee(functionDecl(hasName(Name))),
@@ -405,6 +415,7 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
 
   Finder->addMatcher(callExpr(AnyOfMatchers).bind(FuncExprName), this);
 
+  // 'memchr()' is usually inside a cast expression and we have to remove that.
   Finder->addMatcher(
       castExpr(has(callExpr(anyOf(Memchr, Wmemchr)).bind(FuncExprName)))
           .bind(CastExprName),
