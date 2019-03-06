@@ -115,22 +115,8 @@ void good_memcpy_macro() {
 }
 
 // The following two checks the false-positive suppression.
-void bad_memcpy_tricky() {
-  char *dest06 = (char *)malloc(13);
-  memcpy(&dest06[0], "foobarbazqux", 12);
-  // CHECK-MESSAGES: :[[@LINE-1]]:3: warning: the result from calling 'memcpy' is not null-terminated [bugprone-not-null-terminated-result]
-  // CHECK-FIXES: strcpy(&dest06[0], "foobarbazqux");
-}
-
 void good_memcpy_tricky() {
   char *dst06 = (char *)malloc(13);
   memcpy(&dst06[0], "foobarbazqux", 12);
   dst06[13] = '\0';
-}
-
-void bad_memcpy_tricky_2(const char *src) {
-  int length = strlen(src);
-  char *dest07 = (char *)malloc(length);
-  memcpy(dest07, src, length);
-  dest07[7] = '\0';
 }

@@ -190,11 +190,11 @@ AST_MATCHER_P(Expr, hasDefinition, ast_matchers::internal::Matcher<Expr>,
     return true;
 
   const char *const VarDeclName = "variable-declaration";
-  auto DREHasDefinition = ignoringImpCasts(
-      allOf(declRefExpr(to(varDecl().bind(VarDeclName))),
+  auto DREHasDefinition = ignoringImpCasts(declRefExpr(
+      allOf(to(varDecl().bind(VarDeclName)),
             hasAncestor(compoundStmt(forEachDescendant(binaryOperator(
                 hasLHS(declRefExpr(to(varDecl(equalsBoundNode(VarDeclName))))),
-                hasRHS(ignoringImpCasts(InnerMatcher))))))));
+                hasRHS(ignoringImpCasts(InnerMatcher)))))))));
 
   if (DREHasDefinition.matches(*SimpleNode, Finder, Builder))
     return true;
@@ -312,10 +312,9 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
 
   auto MallocLengthExpr = allOf(
       anyOf(argumentCountIs(1), argumentCountIs(2)),
-      hasAnyArgument(allOf(
-          unless(SizeExpr),
-          ignoringImpCasts(
-              expr(anyOf(HasIncOp, anything())).bind(DestMallocExprName)))));
+      hasAnyArgument(allOf(unless(SizeExpr),
+                           expr(ignoringImpCasts(anyOf(HasIncOp, anything())))
+                               .bind(DestMallocExprName))));
 
   // 2) Example:  (char *)malloc(length);
   auto DestMalloc = anyOf(castExpr(has(callExpr(MallocLengthExpr))),
@@ -329,13 +328,13 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
 
   // 4) Example:  char dest[13];  or  char dest[length];
   auto DestArrayTyDecl = declRefExpr(
-      to(anyOf(varDecl(hasInitializer(AnyOfDestInit)).bind(DestVarDeclName),
-               varDecl(CharTyArray).bind(DestVarDeclName))));
+      to(anyOf(varDecl(CharTyArray).bind(DestVarDeclName),
+               varDecl(hasInitializer(AnyOfDestInit)).bind(DestVarDeclName))));
 
   // 5) Example:  foo[bar[baz]].qux; (or just ParmVarDecl which is a VarDecl)
   auto DestUnknownDecl =
       declRefExpr(allOf(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)),
-                        ignoringImpCasts(expr().bind(UnknownDestName))));
+                        expr().bind(UnknownDestName)));
 
   auto DestKnownDecl =
       declRefExpr(hasDefinition(anyOf(AnyOfDestInit, DestArrayTyDecl)));
@@ -343,7 +342,7 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   // Tie the above cases together in one matcher.
   auto AnyOfDestDecl =
       allOf(anyOf(DestKnownDecl, hasDescendant(DestKnownDecl), DestUnknownDecl,
-                  hasDescendant(DestUnknownDecl), ignoringImpCasts(anything())),
+                  hasDescendant(DestUnknownDecl), anything()),
             expr().bind(DestExprName));
 
   // Match to the 'source' expression.
@@ -365,8 +364,10 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   auto DestDRE = declRefExpr(to(varDecl(equalsBoundNode(DestVarDeclName))));
 
   // If the null terminator is hard-coded later the result is null-terminated.
-  auto NullTerminatorExpr =
-      binaryOperator(hasLHS(anyOf(DestDRE, hasDescendant(DestDRE))));
+  auto NullTerminatorExpr = binaryOperator(
+      hasLHS(hasDescendant(DestDRE)),
+      hasRHS(ignoringImpCasts(
+          anyOf(characterLiteral(equals(0U)), integerLiteral(equals(0))))));
 
   // If the result is rewritten in other function it is usually null-terminated.
   auto ResultIsRewritten = callExpr(hasAnyArgument(ignoringImpCasts(
@@ -723,7 +724,8 @@ static int getLength(const Expr *E, const MatchFinder::MatchResult &Result) {
       if (!isa<ParmVarDecl>(LengthVD))
         if (const Expr *LengthInit = LengthVD->getInit())
           if (LengthInit->EvaluateAsInt(LengthER, *Result.Context))
-            return LengthER.Val.getInt().getZExtValue();
+            return LengthER
+		    .Val.getInt().getZExtValue();
 
   if (const auto *LengthIL = dyn_cast_or_null<IntegerLiteral>(E))
     return LengthIL->getValue().getZExtValue();
