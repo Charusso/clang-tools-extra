@@ -160,53 +160,15 @@ void NotNullTerminatedResultCheck::registerPPCallbacks(
 }
 
 namespace {
-AST_MATCHER_P(Expr, hasDefinition, ast_matchers::internal::Matcher<Expr>,
-              InnerMatcher) {
-  const Expr *SimpleNode = &Node;
-  SimpleNode = SimpleNode->IgnoreParenImpCasts();
-
-  if (InnerMatcher.matches(*SimpleNode, Finder, Builder))
-    return true;
-
-  auto DREHasInit = ignoringImpCasts(
-      declRefExpr(to(varDecl(hasInitializer(ignoringImpCasts(InnerMatcher))))));
-
-  if (DREHasInit.matches(*SimpleNode, Finder, Builder))
-    return true;
-
-  // - Example:  int getLength(const char *str) { return strlen(str); }
-  auto CallExprReturnInit = ignoringImpCasts(
-      callExpr(callee(functionDecl(hasBody(has(returnStmt(hasReturnValue(
-          ignoringImpCasts(anyOf(DREHasInit, InnerMatcher))))))))));
-
-  if (CallExprReturnInit.matches(*SimpleNode, Finder, Builder))
-    return true;
-
-  // - Example:  int length = getLength(src);
-  auto DREHasReturnInit = ignoringImpCasts(
-      declRefExpr(to(varDecl(hasInitializer(CallExprReturnInit)))));
-
-  if (DREHasReturnInit.matches(*SimpleNode, Finder, Builder))
-    return true;
-
-  const char *const VarDeclName = "variable-declaration";
-  auto DREHasDefinition = ignoringImpCasts(declRefExpr(
-      allOf(to(varDecl().bind(VarDeclName)),
-            hasAncestor(compoundStmt(forEachDescendant(binaryOperator(
-                hasLHS(declRefExpr(to(varDecl(equalsBoundNode(VarDeclName))))),
-                hasRHS(ignoringImpCasts(InnerMatcher)))))))));
-
-  if (DREHasDefinition.matches(*SimpleNode, Finder, Builder))
-    return true;
-
-  return false;
+AST_MATCHER(VarDecl, hasRedeclaration) {
+  return ++Node.redecls().begin() != Node.redecls_end();
 }
 } // namespace
 
 void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
 
   //===--------------------------------------------------------------------===//
-  // The following ten is just helper functions.
+  // The following ten is helper functions.
   //===--------------------------------------------------------------------===//
   auto IncOp =
       binaryOperator(hasOperatorName("+"),
@@ -287,12 +249,10 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
 
   const auto AnyOfLengthExpr = [=](StrlenKind LengthKind) {
     return ignoringImpCasts(allOf(
-        unless(hasDefinition(SizeOfCharExpr)),
+        unless(SizeOfCharExpr),
         anyOf(allOf((LengthKind == StrlenKind::WithoutInc)
-                        ? ignoringImpCasts(unless(hasDefinition(HasIncOp)))
-                        : ignoringImpCasts(
-                              allOf(hasDefinition(HasIncOp),
-                                    unless(hasDefinition(HasDecOp)))),
+                        ? ignoringImpCasts(unless(HasIncOp))
+                        : ignoringImpCasts(allOf(HasIncOp, unless(HasDecOp))),
                     AnyOfProblematicLengthInit),
               ignoringImpCasts(integerLiteral().bind(WrongLengthExprName))),
         expr().bind(LengthExprName)));
@@ -310,39 +270,38 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   auto SizeExpr = anyOf(sizeOfExpr(hasType(qualType(hasCanonicalType(CharTy)))),
                         integerLiteral(anyOf(equals(1), equals(2))));
 
-  auto MallocLengthExpr = allOf(
-      anyOf(argumentCountIs(1), argumentCountIs(2)),
-      hasAnyArgument(allOf(unless(SizeExpr),
-                           expr(ignoringImpCasts(anyOf(HasIncOp, anything())))
-                               .bind(DestMallocExprName))));
-
   // 2) Example:  (char *)malloc(length);
-  auto DestMalloc = anyOf(castExpr(has(callExpr(MallocLengthExpr))),
-                          callExpr(MallocLengthExpr));
+  auto MallocLengthExpr = declRefExpr(to(
+      varDecl(
+          allOf(hasInitializer(hasDescendant(callExpr(allOf(
+                    anyOf(argumentCountIs(1), argumentCountIs(2)),
+                    hasAnyArgument(allOf(unless(SizeExpr),
+                                         expr().bind(DestMallocExprName))))))),
+                unless(hasRedeclaration())))
+          .bind(DestVarDeclName)));
 
   // 3) Example:  new char[length];
-  auto DestCXXNewExpr = ignoringImpCasts(
-      cxxNewExpr(hasArraySize(expr().bind(DestMallocExprName))));
-
-  auto AnyOfDestInit = anyOf(DestMalloc, DestCXXNewExpr);
+  auto DestCXXNewExpr = declRefExpr(
+      to(varDecl(hasInitializer(
+                     cxxNewExpr(hasArraySize(expr().bind(DestMallocExprName)))))
+             .bind(DestVarDeclName)));
 
   // 4) Example:  char dest[13];  or  char dest[length];
-  auto DestArrayTyDecl = declRefExpr(
-      to(anyOf(varDecl(CharTyArray).bind(DestVarDeclName),
-               varDecl(hasInitializer(AnyOfDestInit)).bind(DestVarDeclName))));
+  auto DestArrayTyDecl =
+      declRefExpr(to(varDecl(allOf(CharTyArray, unless(hasRedeclaration())))
+                         .bind(DestVarDeclName)));
 
   // 5) Example:  foo[bar[baz]].qux; (or just ParmVarDecl which is a VarDecl)
   auto DestUnknownDecl =
-      declRefExpr(allOf(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)),
-                        expr().bind(UnknownDestName)));
-
-  auto DestKnownDecl =
-      declRefExpr(hasDefinition(anyOf(AnyOfDestInit, DestArrayTyDecl)));
+      declRefExpr(to(varDecl(AnyOfCharTy).bind(DestVarDeclName)))
+          .bind(UnknownDestName);
 
   // Tie the above cases together in one matcher.
   auto AnyOfDestDecl =
-      allOf(anyOf(DestKnownDecl, hasDescendant(DestKnownDecl), DestUnknownDecl,
-                  hasDescendant(DestUnknownDecl), anything()),
+      allOf(anyOf(MallocLengthExpr, hasDescendant(MallocLengthExpr),
+                  DestCXXNewExpr, hasDescendant(DestCXXNewExpr),
+                  DestArrayTyDecl, hasDescendant(DestArrayTyDecl),
+                  DestUnknownDecl, hasDescendant(DestUnknownDecl)),
             expr().bind(DestExprName));
 
   // Match to the 'source' expression.
@@ -364,18 +323,14 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   auto DestDRE = declRefExpr(to(varDecl(equalsBoundNode(DestVarDeclName))));
 
   // If the null terminator is hard-coded later the result is null-terminated.
-  auto NullTerminatorExpr = binaryOperator(
-      hasLHS(hasDescendant(DestDRE)),
-      hasRHS(ignoringImpCasts(
-          anyOf(characterLiteral(equals(0U)), integerLiteral(equals(0))))));
+  auto NullTerminatorExpr = binaryOperator(hasLHS(ignoringImpCasts(DestDRE)));
 
   // If the result is rewritten in other function it is usually null-terminated.
   auto ResultIsRewritten = callExpr(hasAnyArgument(ignoringImpCasts(
       binaryOperator(hasEitherOperand(ignoringImpCasts(DestDRE))))));
 
-  auto FalsePositive =
-      hasAncestor(compoundStmt(anyOf(forEachDescendant(NullTerminatorExpr),
-                                     forEachDescendant(ResultIsRewritten))));
+  auto FalsePositive = hasAncestor(
+      compoundStmt(anyOf(has(NullTerminatorExpr), has(ResultIsRewritten))));
 
   //===--------------------------------------------------------------------===//
   // The following nineteen cases match problematic function calls.
@@ -398,7 +353,10 @@ void NotNullTerminatedResultCheck::registerMatchers(MatchFinder *Finder) {
   const auto WithSrc = [=](StringRef Name, int SourcePos, int LengthPos,
                            StrlenKind LengthKind) {
     return allOf(callee(functionDecl(hasName(Name))),
-                 hasArgument(SourcePos ? 0 : 1, AnyOfDestDecl),
+
+                 // If the source position is '0' there is no destination.
+                 SourcePos ? hasArgument(0, AnyOfDestDecl)
+                           : hasArgument(0, anything()),
                  hasArgument(SourcePos, AnyOfSrcDecl),
                  hasArgument(LengthPos, (LengthKind == StrlenKind::WithoutInc)
                                             ? LengthWithoutInc
@@ -702,7 +660,7 @@ static bool isCorrectGivenLength(const MatchFinder::MatchResult &Result) {
 
 static const Expr *getDestCapacityExpr(const MatchFinder::MatchResult &Result) {
   if (const auto *DestMalloc = Result.Nodes.getNodeAs<Expr>(DestMallocExprName))
-    return DestMalloc;
+    return DestMalloc->IgnoreImpCasts();
 
   if (const auto *DestTy = Result.Nodes.getNodeAs<ArrayType>(DestArrayTyName))
     if (const auto *DestVAT = dyn_cast_or_null<VariableArrayType>(DestTy))
@@ -724,8 +682,7 @@ static int getLength(const Expr *E, const MatchFinder::MatchResult &Result) {
       if (!isa<ParmVarDecl>(LengthVD))
         if (const Expr *LengthInit = LengthVD->getInit())
           if (LengthInit->EvaluateAsInt(LengthER, *Result.Context))
-            return LengthER
-		    .Val.getInt().getZExtValue();
+            return LengthER.Val.getInt().getZExtValue();
 
   if (const auto *LengthIL = dyn_cast_or_null<IntegerLiteral>(E))
     return LengthIL->getValue().getZExtValue();
@@ -803,16 +760,24 @@ static bool isLengthEqualToSrcLength(const MatchFinder::MatchResult &Result) {
 }
 
 static bool isDestCapacityOverflows(const MatchFinder::MatchResult &Result) {
-  if (!isKnownDest(Result))
-    return true;
-
   const auto *DestCapacityExpr = getDestCapacityExpr(Result);
   const auto *LengthExpr = Result.Nodes.getNodeAs<Expr>(LengthExprName);
   int DestCapacity = getLength(DestCapacityExpr, Result);
   int GivenLength = getGivenLength(Result);
 
-  if (GivenLength != 0 && DestCapacity != 0)
+  llvm::errs() << "\n\n";
+  Result.Nodes.getNodeAs<Expr>(FuncExprName)->dumpColor();
+  llvm::errs() << "\n";
+  DestCapacityExpr->dumpColor();
+  llvm::errs() << "DestCapacity: " << DestCapacity
+               << "\nLength: " << GivenLength;
+
+  if (GivenLength != 0 && DestCapacity != 0) {
+    if (GivenLength < DestCapacity)
+      return false;
+
     return isLengthEqualToSrcLength(Result) && DestCapacity == GivenLength;
+  }
 
   StringRef DestCapacityExprStr = exprToStr(DestCapacityExpr, Result);
   StringRef LengthExprStr = exprToStr(LengthExpr, Result);
@@ -821,6 +786,9 @@ static bool isDestCapacityOverflows(const MatchFinder::MatchResult &Result) {
   // capacity contains '+ 1'.
   if (DestCapacityExprStr.contains("+1") || DestCapacityExprStr.contains("+ 1"))
     return false;
+
+  llvm::errs() << "\nDestCapacityExprStr: '" << DestCapacityExprStr << '\''
+               << "\nLengthExprStr: '" << LengthExprStr << '\'';
 
   if (DestCapacityExprStr != "" && DestCapacityExprStr == LengthExprStr)
     return true;

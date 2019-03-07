@@ -88,17 +88,15 @@ void good_memcpy_equal_src_length_and_length() {
 }
 
 void bad_memcpy_dest_size_overflows(const char *src) {
-  const int length = strlen(src);
-  char *dest04 = (char *)malloc(length);
-  memcpy(dest04, src, length);
+  char *dest04 = (char *)malloc(strlen(src));
+  memcpy(dest04, src, strlen(src));
   // CHECK-MESSAGES: :[[@LINE-1]]:3: warning: the result from calling 'memcpy' is not null-terminated [bugprone-not-null-terminated-result]
-  // CHECK-FIXES: char *dest04 = (char *)malloc(length + 1);
+  // CHECK-FIXES: char *dest04 = (char *)malloc(strlen(src) + 1);
   // CHECK-FIXES-NEXT: strcpy(dest04, src);
 }
 
 void good_memcpy_dest_size_overflows(const char *src) {
-  const int length = strlen(src);
-  char *dst04 = (char *)malloc(length + 1);
+  char *dst04 = (char *)malloc(strlen(src) + 1);
   strcpy(dst04, src);
 }
 
